@@ -1,0 +1,2 @@
+# Dependencias de test únicamente (no se instalan en producción, ver run.yml).
+pytest==9.1.1

@@ -1,0 +1,7 @@
+# Versiones pineadas a propósito: el bot corre desatendido por cron semanal, así que
+# una release rompedora de cualquiera de estas aterrizaría un lunes 12:00 UTC sin nadie
+# mirando. Para actualizar: subir el pin a mano y correr el workflow en modo
+# `test` + `local` antes de dejarlo en producción.
+feedparser==6.0.12
+requests==2.34.2
+beautifulsoup4==4.15.0

@@ -1,0 +1,104 @@
+name: Power BI Slack Bot
+
+on:
+  # Corrida automática: lunes 12:00 UTC. Detecta el Feature Summary del mes.
+  # GitHub encola los schedule y los demora: la corrida del 2026-08-04 arrancó
+  # 14:18 UTC, ~2h20m tarde. Es esperable y no afecta a un post mensual.
+  schedule:
+    - cron: "0 12 * * 1"
+  # Disparo manual (para la demo en vivo y para testear sin esperar el cron).
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de selección de post"
+        type: choice
+        options:
+          - production
+          - test
+        default: production
+      post_mode:
+        description: "Salida: local (genera JSON para Block Kit Builder) o webhook (POST real)"
+        type: choice
+        options:
+          - local
+          - webhook
+        default: local
+
+# Necesario para que el job pueda commitear processed_posts.json (solo en webhook).
+permissions:
+  contents: write
+
+# Una sola corrida a la vez. Sin esto, un disparo manual solapado con el cron leería
+# el mismo processed_posts.json que la corrida en curso y publicaría el mismo post dos
+# veces (y el segundo `git push` fallaría). `cancel-in-progress: false` es deliberado:
+# una corrida en curso puede haber publicado ya en Slack, y cancelarla la dejaría sin
+# registrar el post.
+concurrency:
+  group: powerbi-slack-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Correr tests
+        run: python -m pytest tests/ -v
+
+      - name: Ejecutar bot
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # En el cron, los inputs vienen vacíos -> defaults seguros.
+          MODE: ${{ github.event.inputs.mode || 'production' }}
+          # Fase Final completada: el webhook existe y quedó validado, así que las
+          # corridas automáticas publican de verdad. En workflow_dispatch se puede
+          # elegir 'local' para volver a generar solo el JSON sin tocar Slack.
+          POST_MODE: ${{ github.event.inputs.post_mode || 'webhook' }}
+          USE_LLM_SUMMARY: "false"   # Fase LLM: desactivada hasta aprobación.
+        run: python src/main.py
+
+      - name: Subir JSON de Block Kit como artifact
+        # Solo en POST_MODE=local, que es el único modo que escribe el archivo.
+        # En webhook el bot no lo toca, así que sin este `if` el artifact subía la
+        # copia versionada en el repo —vieja— haciéndola pasar por lo recién publicado.
+        # El glob cubre el caso de varios posts nuevos (last_block_kit_1.json, _2, ...).
+        if: ${{ (github.event.inputs.post_mode || 'webhook') == 'local' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-kit-json
+          path: output/last_block_kit*.json
+          if-no-files-found: ignore
+
+      - name: Commitear registro de posts publicados
+        # Solo cuando hubo publicación REAL (webhook) en producción.
+        # Los defaults de acá deben coincidir con los del step "Ejecutar bot": si
+        # divergen, el bot publica pero no registra el post y lo repite la semana
+        # siguiente.
+        #
+        # `always()` es imprescindible, no cosmético: con varios posts nuevos, si el
+        # segundo falla al parsear, el job falla y sin `always()` este step se saltea
+        # — dejando sin registrar el primero, que YA se publicó en Slack, y que se
+        # republicaría en la corrida siguiente. main.py guarda el registro post a post
+        # justo para que acá quede lo efectivamente publicado.
+        if: ${{ always() && (github.event.inputs.mode || 'production') == 'production' && (github.event.inputs.post_mode || 'webhook') == 'webhook' }}
+        run: |
+          if [[ -n "$(git status --porcelain processed_posts.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add processed_posts.json
+            git commit -m "chore: registrar Feature Summary publicado [skip ci]"
+            git push
+          else
+            echo "Sin cambios en processed_posts.json; nada que commitear."
+          fi

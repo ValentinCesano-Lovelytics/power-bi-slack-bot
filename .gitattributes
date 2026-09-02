@@ -1,0 +1,4 @@
+# Normalizar a LF: el workflow corre en Ubuntu y los scripts bash rompen con CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
